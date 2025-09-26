@@ -1,0 +1,115 @@
+// Shortcode to show the download button to higher-level users (not just admins)
+add_shortcode('ld_progress_csv_export', function () {
+    if (!is_user_logged_in()) return '';
+
+    $user = wp_get_current_user();
+    $allowed_roles = ['administrator', 'editor', 'group_leader'];
+
+    foreach ($allowed_roles as $role) {
+        if (in_array($role, (array) $user->roles)) {
+            $download_url = add_query_arg('ld_export_progress_csv', '1', home_url('/'));
+            return '<div style="margin:20px 0;">
+                <a href="' . esc_url($download_url) . '" class="button button-primary">Download LearnDash Progress CSV</a>
+            </div>';
+        }
+    }
+    return ''; // Not allowed
+});
+
+// Export logic that works for anyone with the link
+add_action('init', function () {
+    if (!isset($_GET['ld_export_progress_csv'])) return;
+
+    global $wpdb;
+
+    // Fetch all courses
+    $courses = get_posts([
+        'post_type'      => 'sfwd-courses',
+        'posts_per_page' => -1,
+        'post_status'    => 'publish',
+    ]);
+
+    $users = get_users(['fields' => ['ID', 'user_login']]);
+
+    if (empty($courses) || empty($users)) {
+        wp_die('No courses or users found.');
+    }
+
+    $now = current_time('timestamp');
+    $timestamp = date('Y-m-d', $now);
+    header('Content-Type: text/csv');
+    header("Content-Disposition: attachment;filename=learndash-user-course-dates-{$timestamp}.csv");
+
+    $output = fopen('php://output', 'w');
+
+    // CSV header
+    $header = ['Username', 'Groups', 'Total_Courses_Completed'];
+    foreach ($courses as $course) {
+        $header[] = $course->post_title . ' - Start Date';
+        $header[] = $course->post_title . ' - Completion Date';
+        $header[] = $course->post_title . ' - Time Spent (HH:MM)';
+    }
+    fputcsv($output, $header);
+
+    foreach ($users as $user) {
+        $row = [$user->user_login];
+
+        // Groups
+        $group_ids = learndash_get_users_group_ids($user->ID);
+        $group_names = [];
+        foreach ($group_ids as $gid) {
+            $group_names[] = get_the_title($gid);
+        }
+        $row[] = implode(', ', $group_names);
+
+        // Total courses completed
+        $total_completed = 0;
+
+        foreach ($courses as $course) {
+            $start_date = '';
+            $completion_date = '';
+            $time_spent = '';
+
+            // Get start from user activity
+            $activity = $wpdb->get_row($wpdb->prepare("
+                SELECT activity_started, activity_completed
+                FROM {$wpdb->prefix}learndash_user_activity
+                WHERE user_id = %d AND course_id = %d AND activity_type = 'course'
+                ORDER BY activity_started ASC LIMIT 1
+            ", $user->ID, $course->ID));
+
+            if (!empty($activity) && !empty($activity->activity_started)) {
+                $start_date = date('n/j/Y g:i A', intval($activity->activity_started));
+            }
+
+            // Completion
+            $completed_on = get_user_meta($user->ID, 'course_completed_' . $course->ID, true);
+            if (!empty($completed_on)) {
+                $completion_date = date('n/j/Y g:i A', intval($completed_on));
+                $total_completed++;
+
+                // Time spent (completion - start)
+                if (!empty($activity->activity_started)) {
+                    $diff_seconds = intval($completed_on) - intval($activity->activity_started);
+                    if ($diff_seconds > 0) {
+                        $hours = floor($diff_seconds / 3600);
+                        $minutes = floor(($diff_seconds % 3600) / 60);
+                        $time_spent = sprintf('%02d:%02d', $hours, $minutes);
+                    }
+                }
+            }
+
+            $row[] = $start_date;
+            $row[] = $completion_date;
+            $row[] = $time_spent;
+        }
+
+        // Insert total completed into row
+        array_splice($row, 2, 0, $total_completed);
+
+        fputcsv($output, $row);
+    }
+
+    fclose($output);
+    exit;
+});
