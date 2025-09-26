@@ -1,0 +1,86 @@
+// Shortcode to show download link
+add_shortcode('problem_csv_export', function () {
+    if (!is_user_logged_in()) return '';
+
+    $user = wp_get_current_user();
+    $allowed_roles = ['administrator', 'editor', 'group_leader'];
+
+    foreach ($allowed_roles as $role) {
+        if (in_array($role, (array)$user->roles)) {
+            $download_url = add_query_arg('export_problem_csv', '1', home_url('/'));
+            return '<div style="margin:20px 0;">
+                <a href="' . esc_url($download_url) . '" class="button button-primary">Download Problem Solving Data CSV</a>
+            </div>';
+        }
+    }
+
+    return ''; // Not allowed
+});
+
+// Export logic for anyone with the link
+add_action('init', function () {
+    if (!isset($_GET['export_problem_csv'])) return;
+
+    $posts = get_posts([
+        'post_type' => 'problem',
+        'post_status' => 'publish',
+        'posts_per_page' => -1
+    ]);
+
+    if (empty($posts)) {
+        wp_die('No problem posts found.');
+    }
+
+    $now = current_time('timestamp');
+    $timestamp = date('Y-m-d', $now);
+    header('Content-Type: text/csv');
+    header("Content-Disposition: attachment;filename=problem-export-{$timestamp}.csv");
+
+    $output = fopen('php://output', 'w');
+
+    // CSV header
+    fputcsv($output, [
+        'AIM',
+        'Username',
+        'Solution',
+        'Status',
+        'Creation Date',
+        'Best Solution',
+        'Step'
+    ]);
+
+    foreach ($posts as $post) {
+        $post_id = $post->ID;
+
+        $aim = get_field('aim', $post_id);
+        $username = get_userdata($post->post_author)->user_login ?? '';
+        $status = get_field('status', $post_id);
+        $created = get_the_date('Y-m-d h:i A', $post_id);
+        $best_solution = get_field('best_solution', $post_id);
+
+        $solutions = get_field('solutions', $post_id);
+        $steps = get_field('steps', $post_id);
+
+        $solution_count = is_array($solutions) ? count($solutions) : 0;
+        $step_count = is_array($steps) ? count($steps) : 0;
+        $max_count = max($solution_count, $step_count, 1);
+
+        for ($i = 0; $i < $max_count; $i++) {
+            $solution_value = ($solution_count > 0 && isset($solutions[$i]['solution'])) ? $solutions[$i]['solution'] : '';
+            $step_value = ($step_count > 0 && isset($steps[$i]['step'])) ? $steps[$i]['step'] : '';
+
+            fputcsv($output, [
+                $aim,
+                $username,
+                $solution_value,
+                $status,
+                $created,
+                $best_solution,
+                $step_value,
+            ]);
+        }
+    }
+
+    fclose($output);
+    exit;
+});
